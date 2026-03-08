@@ -38,6 +38,11 @@
 #     and max_kelvin are already integers; reduced 3 Jinja2 set lines to 1
 #   - Simplified hue current_sat guard: the preceding "or [0, 100]" ensures current_hs is always
 #     a 2-element list, making the sequence and length checks redundant
+#   - Fixed "Entity IDs cannot be None" error when saving an automation without last_activity_helper:
+#     HA rejects a null entity_id in state triggers at save time and trigger_variables templates
+#     are not evaluated for state trigger entity_id; replaced the state trigger approach with an
+#     elapsed-time check at the start of each action — reset fires on the first interaction after
+#     the idle period, which is unnoticeable in practice
 
 blueprint:
   name: IKEA E2490 BILRESA Scroll Wheel (Zigbee2MQTT + ZHA)
@@ -286,14 +291,6 @@ trigger:
     id: z2m-payload
     topic: !input z2m_topic
 
-  # Auto-reset: fires after reset_timeout seconds of inactivity on the last_activity_helper.
-  # Only active when last_activity_helper is configured; reset_timeout=0 disables the reset.
-  - platform: state
-    id: activity-timeout
-    entity_id: !input last_activity_helper
-    for:
-      seconds: !input reset_timeout
-
   # ZHA events
   - platform: event
     id: zha-on
@@ -315,21 +312,23 @@ trigger:
       command: move_to_level
 
 action:
-  # Auto-reset: when the activity-timeout trigger fires, reset mode and stop
+  # Auto-reset: on each device event, reset scroll mode if inactive longer than reset_timeout.
+  # Fires on the first interaction after the idle period rather than exactly at timeout, which
+  # is unnoticeable in practice. This avoids a state trigger with a potentially-null entity_id
+  # (HA rejects null entity_id at save time when last_activity_helper is not configured).
   - if:
       - condition: template
-        value_template: "{{ trigger.id == 'activity-timeout' }}"
+        value_template: >
+          {{ scroll_mode_helper is not none
+             and last_activity_helper is not none
+             and reset_timeout > 0
+             and (now().timestamp() - as_timestamp(states(last_activity_helper), 0)) >= reset_timeout }}
     then:
-      - if:
-          - condition: template
-            value_template: "{{ scroll_mode_helper is not none and reset_timeout > 0 }}"
-        then:
-          - service: input_select.select_option
-            target:
-              entity_id: "{{ scroll_mode_helper }}"
-            data:
-              option: "{{ scroll_mode }}"
-      - stop: "Mode reset after inactivity timeout"
+      - service: input_select.select_option
+        target:
+          entity_id: "{{ scroll_mode_helper }}"
+        data:
+          option: "{{ scroll_mode }}"
 
   - choose:
       # Handle Zigbee2MQTT payload with level
